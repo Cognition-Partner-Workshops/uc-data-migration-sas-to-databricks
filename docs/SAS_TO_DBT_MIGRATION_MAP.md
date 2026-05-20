@@ -31,10 +31,10 @@ Macro variables (&var)      →     dbt vars / env_var()
 | `load_customer_accounts.sas` | `stg_cust_accounts.sql` → `int_account_metrics.sql` | PROC SQL join → dbt staging; DATA step derivations → SQL CASE |
 | `daily_transaction_processing.sas` | `stg_daily_transactions.sql` → `mart_daily_transactions.sql` | DATA step validation → SQL WHERE; RETAIN running balance → window function |
 | `credit_risk_scoring.sas` | `mart_risk_scores.sql` | WOE scorecard DATA step → nested SQL CASE; exp() PD calc → SQL exp() |
-| `monthly_regulatory_reporting.sas` | `mart_regulatory_rwa.sql` + `mart_delinquency_aging.sql` | PROC SQL aggregation → SQL GROUP BY; PROC EXPORT → Databricks notebook |
-| `claims_processing.sas` | `stg_claims.sql` → `int_claims_adjudication.sql` | Hash lookup → broadcast join; IF/THEN routing → SQL CASE |
-| `policy_valuation.sas` | `int_policy_valuation.sql` → `mart_loss_ratios.sql` | MERGE BY → SQL JOIN; earned premium calc → SQL date math |
-| `customer_profitability.sas` | `mart_customer_pnl.sql` | Multi-source merge → multi-ref JOIN; tier assignment → CASE |
+| `monthly_regulatory_reporting.sas` | `mart_regulatory_rwa.sql` + `mart_delinquency_aging.sql` | PROC SQL aggregation → SQL GROUP BY; Basel III risk weights → CASE |
+| `claims_processing.sas` | `stg_claims.sql` → `int_claims_adjudication.sql` | Hash lookup → broadcast join; IF/THEN adjudication → SQL CASE |
+| `policy_valuation.sas` | `int_policy_valuation.sql` → `mart_loss_ratios.sql` | MERGE BY → SQL JOIN; earned premium/IBNR calc → SQL date math |
+| `customer_profitability.sas` | `mart_customer_pnl.sql` | Multi-source MERGE BY → multi-ref JOIN; P&L/ROA calc → SQL expressions |
 
 ## SAS Construct Migration Details
 
