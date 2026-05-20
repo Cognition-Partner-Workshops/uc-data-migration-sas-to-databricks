@@ -54,6 +54,7 @@ interest_income as (
 ),
 
 -- SAS Step 2: Fee income from transactions
+-- SAS: WHERE t.TRANSACTION_DATE between "&month_start"d and "&month_end"d
 fee_income as (
     select
         customer_id,
@@ -67,6 +68,7 @@ fee_income as (
         end) as int_credited,
         count(*) as txn_volume
     from transactions
+    where date_format(transaction_date, 'yyyyMM') = '{{ var("prev_ym") }}'
     group by customer_id
 ),
 
