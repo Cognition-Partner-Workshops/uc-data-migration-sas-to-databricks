@@ -1,0 +1,125 @@
+# dbt CI Pipeline for SAS → dbt/Databricks Migration
+#
+# Migration Context:
+#   In the SAS world, there was no CI/CD pipeline. Code was developed in SAS
+#   Enterprise Guide or Display Manager, saved to shared file systems, and
+#   promoted to production via .spk packages deployed through SAS Management
+#   Console — often with no peer review, no automated testing, and no version
+#   control. This GitHub Actions pipeline is the "after" state: every change
+#   goes through automated validation before it reaches production.
+
+name: dbt CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dbt_project/**'
+      - '.sqlfluff'
+      - '.github/workflows/dbt_ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'dbt_project/**'
+      - '.sqlfluff'
+      - '.github/workflows/dbt_ci.yml'
+
+env:
+  DBT_PROFILES_DIR: ${{ github.workspace }}/dbt_project
+  # CI uses a dedicated schema so tests never touch production data.
+  # SAS had no equivalent — dev and prod often shared the same SAS libraries.
+  DBT_SCHEMA: ci_${{ github.run_id }}
+
+jobs:
+  lint:
+    # ── Step 1: SQL Linting ──────────────────────────────────────────────
+    # SAS had no linting tooling. Code style was enforced (if at all) by
+    # manual code review. sqlfluff provides automated, deterministic style
+    # enforcement on every PR — catching issues before they reach review.
+    name: sqlfluff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install sqlfluff
+        run: pip install sqlfluff sqlfluff-templater-dbt dbt-core dbt-databricks
+
+      - name: Run sqlfluff lint
+        working-directory: dbt_project
+        run: sqlfluff lint models/ --config ../.sqlfluff
+
+  validate:
+    # ── Step 2: dbt Compilation & Syntax Validation ──────────────────────
+    # SAS code was often only validated by running it against live data.
+    # `dbt compile` parses all Jinja + SQL without a live connection,
+    # catching syntax errors, missing refs, and broken macros early.
+    name: dbt compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dbt
+        run: pip install dbt-core dbt-databricks
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+
+      - name: dbt compile (syntax validation)
+        working-directory: dbt_project
+        run: dbt compile --target dev
+        env:
+          # Compile-only — these values satisfy the profile parser but
+          # no actual connection is made during `dbt compile`.
+          DATABRICKS_HOST: compile-only.databricks.net
+          DATABRICKS_HTTP_PATH: /sql/1.0/warehouses/compile_only
+          DATABRICKS_TOKEN: dapi_compile_only
+
+  test:
+    # ── Step 3: dbt Schema Tests ─────────────────────────────────────────
+    # SAS had no built-in data quality testing framework. QA was done
+    # manually by reviewing PROC PRINT output or ad hoc PROC SQL counts.
+    # dbt tests are declarative, version-controlled, and run automatically
+    # on every PR — a fundamental governance upgrade.
+    name: dbt test
+    runs-on: ubuntu-latest
+    needs: [validate]
+    # Only run integration tests when Databricks credentials are available.
+    # On forks or PRs from external contributors, this step is skipped
+    # gracefully — the lint and compile steps still protect the codebase.
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dbt
+        run: pip install dbt-core dbt-databricks
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+
+      - name: dbt test (schema tests against CI schema)
+        working-directory: dbt_project
+        run: dbt test --target dev
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
