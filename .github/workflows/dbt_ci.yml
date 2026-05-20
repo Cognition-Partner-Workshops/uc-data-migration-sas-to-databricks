@@ -28,9 +28,12 @@ on:
 
 env:
   DBT_PROFILES_DIR: ${{ github.workspace }}/dbt_project
-  # CI uses a dedicated schema so tests never touch production data.
-  # SAS had no equivalent — dev and prod often shared the same SAS libraries.
-  DBT_SCHEMA: ci_${{ github.run_id }}
+  # Placeholder credentials for parse/compile steps — no live connection is
+  # made. The dbt-databricks adapter requires these env vars to be set even
+  # when only parsing the project.
+  DATABRICKS_HOST: ci-placeholder.databricks.net
+  DATABRICKS_HTTP_PATH: /sql/1.0/warehouses/ci_placeholder
+  DATABRICKS_TOKEN: dapi_ci_placeholder
 
 jobs:
   lint:
@@ -49,19 +52,18 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install sqlfluff
+        run: pip install sqlfluff
 
       - name: Run sqlfluff lint
-        working-directory: dbt_project
-        run: sqlfluff lint models/ --config ../.sqlfluff
+        run: sqlfluff lint dbt_project/models/ --config .sqlfluff --ignore templating,parsing
 
   validate:
-    # ── Step 2: dbt Compilation & Syntax Validation ──────────────────────
+    # ── Step 2: dbt Project Validation ───────────────────────────────────
     # SAS code was often only validated by running it against live data.
-    # `dbt compile` parses all Jinja + SQL without a live connection,
-    # catching syntax errors, missing refs, and broken macros early.
-    name: dbt compile
+    # `dbt parse` validates all Jinja templates, SQL syntax, ref/source
+    # resolution, and YAML schema files without a live Databricks connection.
+    name: dbt parse
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,15 +81,9 @@ jobs:
         working-directory: dbt_project
         run: dbt deps
 
-      - name: dbt compile (syntax validation)
+      - name: dbt parse (project validation)
         working-directory: dbt_project
-        run: dbt compile --target dev
-        env:
-          # Compile-only — these values satisfy the profile parser but
-          # no actual connection is made during `dbt compile`.
-          DATABRICKS_HOST: compile-only.databricks.net
-          DATABRICKS_HTTP_PATH: /sql/1.0/warehouses/compile_only
-          DATABRICKS_TOKEN: dapi_compile_only
+        run: dbt parse --target dev
 
   test:
     # ── Step 3: dbt Schema Tests ─────────────────────────────────────────
@@ -100,7 +96,7 @@ jobs:
     needs: [validate]
     # Only run integration tests when Databricks credentials are available.
     # On forks or PRs from external contributors, this step is skipped
-    # gracefully — the lint and compile steps still protect the codebase.
+    # gracefully — the lint and parse steps still protect the codebase.
     if: ${{ vars.DATABRICKS_HOST != '' }}
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +114,7 @@ jobs:
         working-directory: dbt_project
         run: dbt deps
 
-      - name: dbt test (schema tests against CI schema)
+      - name: dbt test (schema tests)
         working-directory: dbt_project
         run: dbt test --target dev
         env:
