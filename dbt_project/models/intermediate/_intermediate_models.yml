@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: int_account_metrics
+    description: >
+      Account-level derived metrics (age, dormancy, utilization).
+      Migrated from load_customer_accounts.sas (Step 2).
+    columns:
+      - name: account_id
+        tests:
+          - unique
+          - not_null
+
+  - name: int_claims_adjudication
+    description: >
+      Claims with fraud screening and auto-adjudication results.
+      Migrated from claims_processing.sas (Steps 2-4).
+      Hash lookup → broadcast join; IF/THEN routing → SQL CASE.
+    columns:
+      - name: claim_id
+        description: "Primary key — unique claim identifier"
+        tests:
+          - unique
+          - not_null
+      - name: adjudication_result
+        description: "APPR, DENY, or PEND"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['APPR', 'DENY', 'PEND']
+      - name: fraud_risk
+        description: "HIGH, MEDIUM, or LOW based on fraud_score thresholds"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['HIGH', 'MEDIUM', 'LOW']
+
+  - name: int_policy_valuation
+    description: >
+      In-force policy valuation with claims experience, premium collections,
+      loss ratios, and reserve estimates. Migrated from policy_valuation.sas.
+      SAS MERGE BY → SQL LEFT JOIN.
+    columns:
+      - name: policy_id
+        description: "Primary key — unique policy identifier"
+        tests:
+          - unique
+          - not_null
+      - name: policy_type
+        tests:
+          - not_null
+      - name: annual_premium
+        description: "Must be positive for active policies"
+        tests:
+          - not_null
+      - name: premium_adequate
+        description: "Y if combined ratio <= 1.0, else N"
+        tests:
+          - accepted_values:
+              values: ['Y', 'N']
+      - name: loss_ratio
+        description: "Total incurred / YTD earned premium (null if no earned premium)"
+      - name: ibnr_estimate
+        description: "IBNR = max(0, earned_premium × 15% − total_paid)"

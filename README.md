@@ -25,10 +25,10 @@ Target-state dbt project for migrating SAS analytics programs to dbt + Databrick
 | `load_customer_accounts.sas` | `stg_cust_accounts` → `int_account_metrics` | PROC SQL + DATA step → SQL + CASE |
 | `daily_transaction_processing.sas` | `stg_daily_transactions` → `mart_daily_transactions` | RETAIN → window function |
 | `credit_risk_scoring.sas` | `mart_risk_scores` | WOE scorecard → nested CASE + exp() |
-| `monthly_regulatory_reporting.sas` | (planned) `mart_regulatory_rwa` + `mart_delinquency_aging` | PROC SQL aggregation → SQL GROUP BY |
-| `claims_processing.sas` | (planned) `stg_claims` → `int_claims_adjudication` | Hash lookup → broadcast join |
-| `policy_valuation.sas` | (planned) `int_policy_valuation` → `mart_loss_ratios` | MERGE BY → SQL JOIN |
-| `customer_profitability.sas` | (planned) `mart_customer_pnl` | Multi-source merge → multi-ref JOIN |
+| `monthly_regulatory_reporting.sas` | `mart_regulatory_rwa` + `mart_delinquency_aging` | PROC SQL aggregation → SQL GROUP BY |
+| `claims_processing.sas` | `stg_claims` → `int_claims_adjudication` | Hash lookup → broadcast join |
+| `policy_valuation.sas` | `int_policy_valuation` → `mart_loss_ratios` | MERGE BY → SQL JOIN |
+| `customer_profitability.sas` | `mart_customer_pnl` | Multi-source merge → multi-ref JOIN |
 
 See [`docs/SAS_TO_DBT_MIGRATION_MAP.md`](docs/SAS_TO_DBT_MIGRATION_MAP.md) for the complete construct-level mapping (LIBNAME → Unity Catalog, PROC FORMAT → dbt macros, RETAIN → window functions, hash objects → broadcast joins, etc.).
 

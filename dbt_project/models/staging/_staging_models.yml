@@ -1,0 +1,55 @@
+version: 2
+
+models:
+  - name: stg_cust_accounts
+    description: >
+      Staging model for customer accounts joined to demographics.
+      Migrated from load_customer_accounts.sas (Step 1).
+    columns:
+      - name: account_id
+        description: "Primary key — unique account identifier"
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: "FK to customer demographics"
+        tests:
+          - not_null
+
+  - name: stg_daily_transactions
+    description: >
+      Staging model for validated daily transactions.
+      Migrated from daily_transaction_processing.sas (Steps 1-2).
+    columns:
+      - name: transaction_id
+        description: "Primary key — unique transaction identifier"
+        tests:
+          - unique
+          - not_null
+      - name: account_id
+        tests:
+          - not_null
+
+  - name: stg_claims
+    description: >
+      Staging model for validated insurance claims with policy enrichment.
+      Migrated from claims_processing.sas (Step 1).
+      SAS hash object lookup replaced by broadcast JOIN to active policies.
+    columns:
+      - name: claim_id
+        description: "Primary key — unique claim identifier"
+        tests:
+          - unique
+          - not_null
+      - name: policy_id
+        description: "FK to policies — validated as active during ingestion"
+        tests:
+          - not_null
+      - name: claimed_amount
+        description: "Amount claimed — validated to not exceed sum_insured"
+        tests:
+          - not_null
+      - name: loss_date
+        description: "Date of loss — validated within policy period"
+        tests:
+          - not_null
