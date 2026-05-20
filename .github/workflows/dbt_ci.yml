@@ -1,0 +1,123 @@
+# dbt CI Pipeline for SAS → dbt/Databricks Migration
+#
+# Migration Context:
+#   In the SAS world, there was no CI/CD pipeline. Code was developed in SAS
+#   Enterprise Guide or Display Manager, saved to shared file systems, and
+#   promoted to production via .spk packages deployed through SAS Management
+#   Console — often with no peer review, no automated testing, and no version
+#   control. This GitHub Actions pipeline is the "after" state: every change
+#   goes through automated validation before it reaches production.
+
+name: dbt CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dbt_project/**'
+      - '.sqlfluff'
+      - 'requirements.txt'
+      - '.github/workflows/dbt_ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'dbt_project/**'
+      - '.sqlfluff'
+      - 'requirements.txt'
+      - '.github/workflows/dbt_ci.yml'
+
+env:
+  DBT_PROFILES_DIR: ${{ github.workspace }}/dbt_project
+  # Placeholder credentials for parse/compile steps — no live connection is
+  # made. The dbt-databricks adapter requires these env vars to be set even
+  # when only parsing the project.
+  DATABRICKS_HOST: ci-placeholder.databricks.net
+  DATABRICKS_HTTP_PATH: /sql/1.0/warehouses/ci_placeholder
+  DATABRICKS_TOKEN: dapi_ci_placeholder
+
+jobs:
+  lint:
+    # ── Step 1: SQL Linting ──────────────────────────────────────────────
+    # SAS had no linting tooling. Code style was enforced (if at all) by
+    # manual code review. sqlfluff provides automated, deterministic style
+    # enforcement on every PR — catching issues before they reach review.
+    name: sqlfluff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install sqlfluff
+        run: pip install sqlfluff
+
+      - name: Run sqlfluff lint
+        run: sqlfluff lint dbt_project/models/ --config .sqlfluff --ignore templating,parsing
+
+  validate:
+    # ── Step 2: dbt Project Validation ───────────────────────────────────
+    # SAS code was often only validated by running it against live data.
+    # `dbt parse` validates all Jinja templates, SQL syntax, ref/source
+    # resolution, and YAML schema files without a live Databricks connection.
+    name: dbt parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+
+      - name: dbt parse (project validation)
+        working-directory: dbt_project
+        run: dbt parse --target dev
+
+  test:
+    # ── Step 3: dbt Schema Tests ─────────────────────────────────────────
+    # SAS had no built-in data quality testing framework. QA was done
+    # manually by reviewing PROC PRINT output or ad hoc PROC SQL counts.
+    # dbt tests are declarative, version-controlled, and run automatically
+    # on every PR — a fundamental governance upgrade.
+    name: dbt test
+    runs-on: ubuntu-latest
+    needs: [validate]
+    # Only run integration tests when Databricks credentials are available.
+    # On forks or PRs from external contributors, this step is skipped
+    # gracefully — the lint and parse steps still protect the codebase.
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+
+      - name: dbt test (schema tests)
+        working-directory: dbt_project
+        run: dbt test --target dev
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
