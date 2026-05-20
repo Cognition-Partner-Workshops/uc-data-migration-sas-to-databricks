@@ -1,4 +1,4 @@
-# dbt CI Pipeline for SAS → dbt/Databricks Migration
+# dbt CI/CD Pipeline for SAS → dbt/Databricks Migration
 #
 # Migration Context:
 #   In the SAS world, there was no CI/CD pipeline. Code was developed in SAS
@@ -7,8 +7,16 @@
 #   Console — often with no peer review, no automated testing, and no version
 #   control. This GitHub Actions pipeline is the "after" state: every change
 #   goes through automated validation before it reaches production.
+#
+# Deployment Context:
+#   In the SAS world, deployment meant copying .spk packages through SAS
+#   Management Console or updating Control-M job definitions via a GUI.
+#   This pipeline replaces that with automated, environment-aware deployment
+#   of Databricks Workflow definitions using the Databricks CLI. The workflow
+#   JSON (workflows/daily_banking_pipeline.json) is the code equivalent of
+#   what was previously a Control-M XML export.
 
-name: dbt CI
+name: dbt CI/CD
 
 on:
   pull_request:
@@ -17,14 +25,31 @@ on:
       - 'dbt_project/**'
       - '.sqlfluff'
       - 'requirements.txt'
+      - 'workflows/**'
       - '.github/workflows/dbt_ci.yml'
   push:
-    branches: [main]
+    branches: [main, staging, 'release/**']
     paths:
       - 'dbt_project/**'
       - '.sqlfluff'
       - 'requirements.txt'
+      - 'workflows/**'
       - '.github/workflows/dbt_ci.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      dry_run:
+        description: 'Perform a dry run (validate only, do not deploy)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   DBT_PROFILES_DIR: ${{ github.workspace }}/dbt_project
@@ -121,3 +146,268 @@ jobs:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+  # ── Step 4: Determine Deployment Target ────────────────────────────────
+  # Maps the trigger event and branch to the correct Databricks environment.
+  # In the SAS world, promotion was manual: an admin would copy files between
+  # /sas/dev, /sas/staging, and /sas/prod directories — or re-import .spk
+  # packages in SAS Management Console. This job automates that decision.
+  resolve-environment:
+    name: Resolve deployment environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      dry_run: ${{ steps.set-env.outputs.dry_run }}
+      should_deploy: ${{ steps.set-env.outputs.should_deploy }}
+    steps:
+      - name: Determine environment from context
+        id: set-env
+        run: |
+          # workflow_dispatch: use the user-selected environment and dry_run flag
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+          # push to main: deploy to prod
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+          # push to staging branch: deploy to staging with dry-run by default
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+          # push to release/* branches: deploy to staging
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/heads/release/* ]]; then
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+          # pull_request: no deployment
+          else
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Step 5: Validate Workflow JSON ─────────────────────────────────────
+  # Validates the Databricks workflow definition before any deployment attempt.
+  # Catches malformed JSON, missing required fields, and structural issues
+  # early — before the Databricks API rejects them with a cryptic error.
+  validate-workflow:
+    name: Validate workflow JSON
+    runs-on: ubuntu-latest
+    needs: [resolve-environment]
+    if: ${{ needs.resolve-environment.outputs.should_deploy == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON syntax
+        run: |
+          echo "Validating JSON syntax..."
+          if ! jq empty workflows/daily_banking_pipeline.json 2>&1; then
+            echo "::error::workflows/daily_banking_pipeline.json is not valid JSON"
+            exit 1
+          fi
+          echo "✓ JSON syntax is valid"
+
+      - name: Validate required workflow fields
+        run: |
+          echo "Validating required Databricks Workflow fields..."
+
+          # Check top-level required fields
+          for field in name format tasks schedule; do
+            if ! jq -e ".$field" workflows/daily_banking_pipeline.json > /dev/null 2>&1; then
+              echo "::error::Missing required field: '$field'"
+              exit 1
+            fi
+          done
+          echo "✓ All required top-level fields present"
+
+          # Validate task structure
+          task_count=$(jq '.tasks | length' workflows/daily_banking_pipeline.json)
+          if [[ "$task_count" -eq 0 ]]; then
+            echo "::error::Workflow must have at least one task"
+            exit 1
+          fi
+          echo "✓ Workflow has $task_count tasks"
+
+          # Verify each task has a task_key
+          missing_keys=$(jq '[.tasks[] | select(.task_key == null or .task_key == "")] | length' workflows/daily_banking_pipeline.json)
+          if [[ "$missing_keys" -gt 0 ]]; then
+            echo "::error::$missing_keys task(s) are missing 'task_key'"
+            exit 1
+          fi
+          echo "✓ All tasks have task_key defined"
+
+          # Verify DAG integrity: all depends_on references point to existing task_keys
+          all_keys=$(jq -r '[.tasks[].task_key] | join(" ")' workflows/daily_banking_pipeline.json)
+          deps=$(jq -r '[.tasks[].depends_on[]?.task_key // empty] | unique | join(" ")' workflows/daily_banking_pipeline.json)
+          for dep in $deps; do
+            if ! echo "$all_keys" | grep -qw "$dep"; then
+              echo "::error::Task dependency '$dep' references a non-existent task_key"
+              exit 1
+            fi
+          done
+          echo "✓ DAG dependency references are valid"
+
+      - name: Print workflow summary
+        run: |
+          echo "=== Workflow Summary ==="
+          echo "Name: $(jq -r '.name' workflows/daily_banking_pipeline.json)"
+          echo "Format: $(jq -r '.format' workflows/daily_banking_pipeline.json)"
+          echo "Tasks:"
+          jq -r '.tasks[] | "  - \(.task_key): \(.description[:80])..."' workflows/daily_banking_pipeline.json
+          echo "Schedule: $(jq -r '.schedule.quartz_cron_expression' workflows/daily_banking_pipeline.json) ($(jq -r '.schedule.timezone_id' workflows/daily_banking_pipeline.json))"
+
+  # ── Step 6: Deploy to Databricks ───────────────────────────────────────
+  # Deploys the workflow definition to the target Databricks workspace using
+  # the Databricks CLI. This replaces the manual process of updating Control-M
+  # job definitions via its GUI and the SAS Management Console .spk promotion.
+  #
+  # Each GitHub environment (dev, staging, prod) stores its own:
+  #   - DATABRICKS_HOST        (workspace URL)
+  #   - DATABRICKS_TOKEN       (PAT or service principal token)
+  #   - DATABRICKS_WAREHOUSE_ID (SQL warehouse for dbt tasks)
+  #   - DATABRICKS_WORKFLOW_ID  (existing job ID — omit for first-time creation)
+  #   - PAGERDUTY_WEBHOOK_ID   (alerting webhook — prod only)
+  deploy:
+    name: Deploy workflow (${{ needs.resolve-environment.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [lint, validate, test, validate-workflow, resolve-environment]
+    # Deploy when: all gates passed, deployment is enabled, and either test
+    # ran successfully OR test was skipped (no Databricks creds for fork PRs).
+    if: |
+      always() &&
+      needs.resolve-environment.outputs.should_deploy == 'true' &&
+      needs.lint.result == 'success' &&
+      needs.validate.result == 'success' &&
+      needs.validate-workflow.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    environment: ${{ needs.resolve-environment.outputs.environment }}
+    concurrency:
+      group: deploy-${{ needs.resolve-environment.outputs.environment }}
+      cancel-in-progress: false
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DEPLOY_ENV: ${{ needs.resolve-environment.outputs.environment }}
+      DRY_RUN: ${{ needs.resolve-environment.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks --version
+
+      - name: Prepare workflow definition for ${{ needs.resolve-environment.outputs.environment }}
+        run: |
+          echo "Preparing workflow for environment: $DEPLOY_ENV"
+
+          # Substitute environment-specific variables into the workflow JSON.
+          # The source JSON uses ${var.*} placeholders (Terraform-style) which
+          # we replace here with GitHub environment secret values.
+          jq \
+            --arg warehouse_id "${{ secrets.DATABRICKS_WAREHOUSE_ID }}" \
+            --arg pagerduty_id "${{ secrets.PAGERDUTY_WEBHOOK_ID }}" \
+            --arg env_tag "$DEPLOY_ENV" \
+            '
+              # Replace variable placeholders with environment-specific values
+              (.tasks[].dbt_task.warehouse_id) = $warehouse_id |
+
+              # Update the environment tag to reflect the deployment target
+              .tags.environment = $env_tag |
+
+              # Set PagerDuty webhook (empty string removes the notification)
+              (if $pagerduty_id != "" then
+                .webhook_notifications.on_failure = [{"id": $pagerduty_id}]
+              else
+                del(.webhook_notifications)
+              end)
+            ' workflows/daily_banking_pipeline.json > /tmp/workflow_prepared.json
+
+          echo "✓ Workflow prepared for $DEPLOY_ENV"
+          echo "=== Prepared Workflow ==="
+          jq '.' /tmp/workflow_prepared.json
+
+      - name: Deploy workflow (dry run)
+        if: ${{ needs.resolve-environment.outputs.dry_run == 'true' }}
+        run: |
+          echo "════════════════════════════════════════════════════════════"
+          echo " DRY RUN — Validating deployment without applying changes"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+          echo "Target:      $DEPLOY_ENV"
+          echo "Workspace:   $DATABRICKS_HOST"
+          echo "Workflow:    $(jq -r '.name' /tmp/workflow_prepared.json)"
+          echo ""
+
+          # Validate the prepared JSON can be accepted by the Databricks API
+          # by calling the jobs API with a validation-only request.
+          # The 'databricks jobs create' with --dry-run is not natively
+          # supported, so we validate the JSON and print what would be deployed.
+          echo "Validating prepared workflow JSON structure..."
+          jq -e '.name and .tasks and (.tasks | length > 0)' /tmp/workflow_prepared.json > /dev/null
+          echo "✓ Workflow JSON passes structural validation"
+          echo ""
+
+          # Attempt API-level validation if credentials are available
+          if [[ -n "$DATABRICKS_TOKEN" && "$DATABRICKS_TOKEN" != "dapi_ci_placeholder" ]]; then
+            echo "Attempting API-level validation..."
+            # Use the jobs API to validate — create then immediately delete, or
+            # use the validate endpoint if available
+            if databricks jobs list --output json > /dev/null 2>&1; then
+              echo "✓ Databricks API connection verified"
+            else
+              echo "⚠ Could not connect to Databricks API (credentials may not be configured for $DEPLOY_ENV)"
+            fi
+          else
+            echo "⚠ Skipping API validation — no credentials configured for $DEPLOY_ENV"
+          fi
+
+          echo ""
+          echo "=== Workflow that would be deployed ==="
+          jq '.' /tmp/workflow_prepared.json
+          echo ""
+          echo "Dry run complete. No changes were applied."
+
+      - name: Deploy workflow
+        if: ${{ needs.resolve-environment.outputs.dry_run != 'true' }}
+        run: |
+          echo "Deploying workflow to $DEPLOY_ENV..."
+          echo "Workspace: $DATABRICKS_HOST"
+
+          WORKFLOW_ID="${{ secrets.DATABRICKS_WORKFLOW_ID }}"
+
+          if [[ -n "$WORKFLOW_ID" ]]; then
+            echo "Updating existing workflow (Job ID: $WORKFLOW_ID)..."
+            databricks jobs reset --job-id "$WORKFLOW_ID" \
+              --json @/tmp/workflow_prepared.json
+            echo "✓ Workflow updated successfully (Job ID: $WORKFLOW_ID)"
+          else
+            echo "Creating new workflow..."
+            RESULT=$(databricks jobs create --json @/tmp/workflow_prepared.json)
+            NEW_JOB_ID=$(echo "$RESULT" | jq -r '.job_id')
+            echo "✓ Workflow created successfully (Job ID: $NEW_JOB_ID)"
+            echo ""
+            echo "::notice::New workflow created with Job ID: $NEW_JOB_ID. Add this as DATABRICKS_WORKFLOW_ID in the '$DEPLOY_ENV' GitHub environment to enable updates on future deployments."
+          fi
+
+      - name: Post-deployment summary
+        if: ${{ always() }}
+        run: |
+          echo "### Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`$DEPLOY_ENV\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dry Run | \`$DRY_RUN\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Workflow | \`$(jq -r '.name' /tmp/workflow_prepared.json 2>/dev/null || echo 'N/A')\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trigger | \`${{ github.event_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
