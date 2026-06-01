@@ -1,0 +1,61 @@
+# CD: deploy the Databricks Asset Bundle.
+#
+# Migration context:
+#   The SAS estate promoted code by hand (.spk packages through SAS Management
+#   Console). This is the "after" state: the pipeline (Workflow + tasks) is
+#   version-controlled IaC and deployed with `databricks bundle deploy`.
+#
+# Two triggers, by design (see DEMO_RUNBOOK.md):
+#   - push to main          -> the real on-merge CD story
+#   - workflow_dispatch      -> run the deploy live WITHOUT merging to main, so a
+#                               repeatable walkthrough can deploy from the branch
+#                               and then revert with `databricks bundle destroy`.
+#
+# Reverting a deploy: `make destroy TARGET=dev` (or run the "destroy" path
+# locally) removes the job and returns the workspace to the before-state.
+
+name: deploy bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'databricks.yml'
+      - 'resources/**'
+      - 'src/**'
+      - 'dbt_project/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Bundle target to deploy
+        type: choice
+        options: [dev, prod]
+        default: dev
+      namespace:
+        description: Schema namespace (dbt_schema var) for isolated DB space
+        type: string
+        default: dev
+
+jobs:
+  deploy:
+    name: databricks bundle deploy
+    runs-on: ubuntu-latest
+    # Skip cleanly when workspace credentials are not configured (e.g. forks).
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      TARGET: ${{ github.event.inputs.target || 'dev' }}
+      NAMESPACE: ${{ github.event.inputs.namespace || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sudo sh
+
+      - name: Validate bundle
+        run: databricks bundle validate -t "$TARGET" --var="dbt_schema=$NAMESPACE"
+
+      - name: Deploy bundle
+        run: databricks bundle deploy -t "$TARGET" --var="dbt_schema=$NAMESPACE"
