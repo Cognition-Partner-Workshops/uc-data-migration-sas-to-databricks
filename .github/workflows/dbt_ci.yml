@@ -123,10 +123,15 @@ jobs:
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
 
-      - name: dbt build (models + schema + reconciliation tests)
+      # Build into an isolated, per-run schema so PR CI never reads or collides
+      # with the shared `dev` namespace that live sessions write to. `dbt build`
+      # runs the models AND their tests against the freshly materialized tables,
+      # so the reconciliation controls are self-consistent within the run.
+      - name: dbt build (isolated per-run schema)
         working-directory: dbt_project
         run: dbt build --target dev
         env:
+          DBT_SCHEMA: ci_${{ github.run_id }}_${{ github.run_attempt }}
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -163,7 +168,7 @@ jobs:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
 
       - name: Run reconciliation report
-        run: python verify/reconcile.py --namespace dev --report reconciliation_report.md
+        run: python verify/reconcile.py --namespace ci_${{ github.run_id }}_${{ github.run_attempt }} --report reconciliation_report.md
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
@@ -175,3 +180,30 @@ jobs:
         with:
           name: reconciliation-report
           path: reconciliation_report.md
+
+  cleanup:
+    # ── Drop the per-run CI schemas ─────────────────────────────────────
+    # Runs regardless of test/reconcile outcome so isolated CI schemas
+    # (ci_<run_id>_<attempt>_*) never accumulate in the shared catalog.
+    name: cleanup CI schemas
+    runs-on: ubuntu-latest
+    needs: [test, reconcile]
+    if: ${{ always() && vars.DATABRICKS_HOST != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r verify/requirements.txt
+
+      - name: Drop per-run CI schemas
+        run: python .github/scripts/drop_ci_schemas.py --prefix ci_${{ github.run_id }}_${{ github.run_attempt }}
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
