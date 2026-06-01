@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - 'dbt_project/**'
+      - 'verify/**'
       - '.sqlfluff'
       - 'requirements.txt'
       - '.github/workflows/dbt_ci.yml'
@@ -22,6 +23,7 @@ on:
     branches: [main]
     paths:
       - 'dbt_project/**'
+      - 'verify/**'
       - '.sqlfluff'
       - 'requirements.txt'
       - '.github/workflows/dbt_ci.yml'
@@ -114,10 +116,48 @@ jobs:
         working-directory: dbt_project
         run: dbt deps
 
-      - name: dbt test (schema tests)
+      - name: dbt test (schema + reconciliation tests)
         working-directory: dbt_project
         run: dbt test --target dev
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+  reconcile:
+    # ── Step 4: Source → Target Reconciliation ──────────────────────────
+    # The dbt singular tests above gate the reconciliation invariants on every
+    # build. This job runs the human-facing reconciliation report
+    # (verify/reconcile.py) and publishes it as a build artifact, so every PR
+    # carries a visible, attachable proof that the conversion matches the source.
+    # Each converted program extends the report with its own controls (risk-weight
+    # parity, control totals, cross-engine PySpark checks).
+    name: reconciliation report
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: ${{ vars.DATABRICKS_HOST != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r verify/requirements.txt
+
+      - name: Run reconciliation report
+        run: python verify/reconcile.py --namespace dev --report reconciliation_report.md
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+      - name: Upload reconciliation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconciliation-report
+          path: reconciliation_report.md
