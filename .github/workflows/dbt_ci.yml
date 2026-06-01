@@ -153,7 +153,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r verify/requirements.txt
+        run: pip install -r verify/requirements.txt -r seed/requirements.txt
+
+      - name: Seed raw data (ensure fresh baseline for reconciliation)
+        run: python seed/generate_and_load.py
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
 
       - name: Run reconciliation report
         run: python verify/reconcile.py --namespace dev --report reconciliation_report.md
