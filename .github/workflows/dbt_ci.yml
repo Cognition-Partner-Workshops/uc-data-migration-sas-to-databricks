@@ -116,9 +116,16 @@ jobs:
         working-directory: dbt_project
         run: dbt deps
 
-      - name: dbt test (schema + reconciliation tests)
+      - name: Seed raw data
+        run: pip install -r seed/requirements.txt && python seed/generate_and_load.py
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+      - name: dbt build (models + schema + reconciliation tests)
         working-directory: dbt_project
-        run: dbt test --target dev
+        run: dbt build --target dev
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
