@@ -125,6 +125,7 @@ jobs:
         run: dbt build --target dev
         env:
           DBT_SCHEMA: ci_${{ github.run_id }}_${{ github.run_attempt }}
+          DBT_RAW_SCHEMA: raw_sas
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -154,7 +155,7 @@ jobs:
         run: pip install -r verify/requirements.txt
 
       - name: Run reconciliation report
-        run: python verify/reconcile.py --namespace ci_${{ github.run_id }}_${{ github.run_attempt }} --report reconciliation_report.md
+        run: python verify/reconcile.py --namespace ci_${{ github.run_id }}_${{ github.run_attempt }} --raw-schema raw_sas --report reconciliation_report.md
         env:
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
